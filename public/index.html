@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NRC ADAMS 문서 분석</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" type="module"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="identity"><span class="mark" aria-hidden="true"><i></i></span><strong>NRC ADAMS</strong><span class="product">문서 분석</span></div>
+    <div id="session" class="session" hidden><span id="email"></span><button id="logout" class="quiet">로그아웃</button></div>
+  </header>
+  <main id="auth" class="auth" hidden>
+    <section class="auth-intro">
+      <h1>ADAMS 문서를<br>찾고, 읽고, 정리하세요.</h1>
+      <p>NRC 공개 문서의 한영 분석 결과를 원문 근거와 함께 보관하세요.</p>
+    </section>
+    <section class="panel auth-panel">
+      <div class="tabs" aria-label="계정">
+        <button id="login-tab" type="button" aria-pressed="true">로그인</button>
+        <button id="signup-tab" type="button" aria-pressed="false">계정 만들기</button>
+      </div>
+      <form id="auth-form">
+        <label>이메일<input name="email" required type="email" autocomplete="username" maxlength="254"></label>
+        <label>비밀번호<input name="password" required type="password" autocomplete="current-password" minlength="12" maxlength="128"></label>
+        <label id="invite-field" hidden>초대 코드<input name="invite" type="password" maxlength="200"></label>
+        <p id="auth-message" class="message" role="status"></p>
+        <button class="primary" id="auth-submit">로그인</button>
+      </form>
+    </section>
+  </main>
+  <div id="workspace" class="workspace" hidden>
+    <aside class="sidebar">
+      <nav aria-label="작업 공간">
+        <button data-view="search" aria-current="page"><span aria-hidden="true">⌕</span>문서 검색</button>
+        <button data-view="library"><span aria-hidden="true">▤</span>보관함</button>
+        <button data-view="settings"><span aria-hidden="true">⚙</span>API 설정</button>
+        <a class="notebook-link" href="https://notebook.google.com/" target="_blank" rel="noopener noreferrer">Gemini Notebook ↗</a>
+      </nav>
+      <a href="https://adams-search.nrc.gov/" target="_blank" rel="noreferrer" class="official">NRC ADAMS 공식 사이트 <span aria-hidden="true">↗</span></a>
+    </aside>
+    <main id="content" class="content">
+      <p id="notice" class="notice" role="status" hidden></p>
+      <section id="search-view">
+        <header class="view-head"><h1>문서 검색</h1><p>찾는 문서를 한국어 또는 영어로 설명하면 AI가 NRC 용어로 검색합니다. ML 번호로 바로 열 수도 있습니다.</p></header>
+        <form id="search-form" class="panel search-panel">
+          <label for="query">찾는 문서 또는 ML 번호</label>
+          <div class="search-line">
+            <input id="query" name="q" placeholder="예시  2022년 이후 Palo Verde 2호기 인허가 변경을 승인한 NRC 문서" maxlength="500">
+            <button class="primary">검색</button>
+          </div>
+          <div class="search-route">
+            <label class="checkbox"><input name="smart" type="checkbox" checked>AI로 검색 의도 분석</label>
+            <label class="checkbox"><input name="public" type="checkbox">NRC 키 없이 공개 경로 사용</label>
+            <a href="https://adams-search.nrc.gov/adv-search" target="_blank" rel="noreferrer">NRC 공개 고급검색 열기</a>
+          </div>
+          <details>
+            <summary>고급 필터</summary>
+            <div class="filters">
+              <label>Docket 번호<input name="docket" placeholder="05000271" maxlength="20"></label>
+              <label>보고서 번호<input name="report" placeholder="NUREG/CR-0927" maxlength="160"></label>
+              <label>문서 제목<input name="title" placeholder="Inspection Report" maxlength="240"></label>
+              <label>문서 유형<input name="type" placeholder="Inspection Report" maxlength="100"></label>
+              <label>작성일 시작<input name="from" type="date"></label>
+              <label>작성일 종료<input name="to" type="date"></label>
+            </div>
+            <label class="checkbox"><input name="legacy" type="checkbox">Legacy Library 포함</label>
+          </details>
+        </form>
+        <details class="panel import-panel" id="import-panel">
+          <summary>공개 PDF 가져오기</summary>
+          <form id="public-form">
+            <label>ML 번호 또는 NRC 공식 PDF 주소<input name="source" required maxlength="2000" placeholder="ML24017A120 또는 https://www.nrc.gov/…"></label>
+            <button>문서 열기</button>
+          </form>
+          <form id="upload-form">
+            <label>NRC에서 내려받은 PDF<input name="pdf" type="file" accept="application/pdf,.pdf" required></label>
+            <label>ML 번호 (선택)<input name="accession" maxlength="11" placeholder="ML24017A120"></label>
+            <button>PDF 올리기</button>
+          </form>
+          <button id="manage-uploads" type="button" class="quiet">업로드한 원본 PDF 관리</button>
+        </details>
+        <section class="results"><h2>검색 결과</h2><div id="search-results" aria-live="polite"></div><button id="more" hidden>결과 더 보기</button></section>
+      </section>
+      <section id="document-view" hidden>
+        <button id="back" class="quiet">검색 결과로</button>
+        <header class="view-head"><p id="doc-meta" class="metadata"></p><h1 id="doc-title"></h1><a id="doc-source" target="_blank" rel="noreferrer" hidden>NRC 원문 열기 ↗</a></header>
+        <div id="notebook-tools" class="notebook-tools" hidden>
+          <a id="notebook-pdf" download>원문 PDF 내려받기</a>
+          <a href="https://notebook.google.com/" target="_blank" rel="noopener noreferrer">Gemini Notebook에서 상세 분석 ↗</a>
+          <span class="metadata">내려받은 PDF를 노트북의 소스로 추가하세요.</span>
+        </div>
+        <div id="package"></div>
+        <div id="workbench" class="workbench" hidden>
+          <section class="panel pdf-panel" aria-label="원문 PDF">
+            <header><h2>원문 PDF</h2><span id="pdf-page" class="metadata"></span><a id="preview-link" target="_blank" rel="noreferrer">새 탭에서 열기 ↗</a></header>
+            <div id="pdf-preview" class="pdf-preview">
+              <p id="preview-status" class="metadata" role="status" hidden></p>
+              <button id="retry-preview" type="button" hidden>미리보기 다시 시도</button>
+            </div>
+            <div id="preview-controls" class="preview-controls" hidden>
+              <button id="preview-prev" class="quiet">이전 쪽</button>
+              <button id="preview-next" class="quiet">다음 쪽</button>
+            </div>
+          </section>
+          <section class="panel analysis-panel" aria-label="한영 문서 분석">
+            <div class="tabs"><button id="summary-tab" aria-pressed="true">한영 요약</button><button id="extract-tab" aria-pressed="false">맞춤 추출</button></div>
+            <form id="analysis-form">
+              <label id="question-label" hidden>추출할 항목 또는 질문<textarea id="question" maxlength="1200" placeholder="예시  NRC 결론, 시정조치, 제출기한을 찾아줘."></textarea></label>
+              <label id="analysis-range-label" hidden>PDF 쪽수 지정 (선택)<input id="analysis-range" maxlength="15" placeholder="예시  121-145">
+                <span class="metadata">비워 두면 질문과 관련된 페이지를 자동으로 찾습니다. 범위 지정 시 한 번에 최대 36쪽을 분석합니다.</span>
+              </label>
+              <div class="actions"><button class="primary" id="run-analysis">요약 생성</button><button type="button" id="rerun" hidden>다시 분석</button></div>
+            </form>
+            <label id="history-label" hidden>분석 기록<select id="history"></select></label>
+            <div id="analysis-results" aria-live="polite"></div>
+          </section>
+        </div>
+      </section>
+      <section id="library-view" hidden>
+        <header class="view-head"><h1>보관함</h1><p>선택해 저장한 한영 결과와 원문 근거를 다시 확인하세요.</p></header>
+        <details id="uploads-panel" class="panel upload-management">
+          <summary>업로드한 원본 PDF 관리</summary>
+          <p id="upload-usage" class="metadata"></p>
+          <div id="upload-list"></div>
+        </details>
+        <div class="library-controls"><label><span class="sr-only">보관함 검색</span><input id="library-query" placeholder="문서 제목, ML 번호, 항목, 내용 검색"></label><button id="csv">한영 CSV 내려받기</button></div>
+        <div id="library-items" class="results"></div>
+      </section>
+      <section id="settings-view" hidden>
+        <header class="view-head"><h1>API 설정</h1><p>내 계정에서 사용할 키를 저장하고 기본 AI를 선택하세요.</p></header>
+        <section class="panel selection">
+          <label>사용할 AI<select id="provider"><option value="gemini">Google Gemini</option><option value="openai">OpenAI</option><option value="claude">Anthropic Claude</option></select></label>
+          <p>NRC 키는 앱 안에서 검색 결과를 볼 때 사용합니다. 키 없이 공개 검색이나 PDF를 열 수도 있습니다. 선택한 AI에는 분석할 PDF와 질문을 보냅니다.</p>
+        </section>
+        <div id="credentials" class="credential-grid"></div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
