@@ -9,6 +9,7 @@ const state = { session: 0, view: 'search', mode: 'summary', docs: [], resultsLo
   previewRequest: null, previewPage: 1, previewTotal: null, previewObject: null };
 let authMode = 'login';
 let inviteRequired = false;
+let localAccess = false;
 let searchToken = 0;
 let accountCheck = 0;
 const authEvent = 'adams-account-change';
@@ -140,7 +141,8 @@ async function session({ email, accountId }) {
   $('session').hidden = !email;
   $('auth').hidden = Boolean(email);
   $('workspace').hidden = !email;
-  $('email').textContent = email || '';
+  $('email').textContent = localAccess ? '로컬 모드' : email || '';
+  $('logout').hidden = localAccess;
   if (!email) {
     authTab('login');
     return;
@@ -158,6 +160,7 @@ async function syncAccount() {
   const account = await api('/api/me');
   if (version !== accountCheck) return;
   inviteRequired = account.inviteRequired;
+  localAccess = account.local === true;
   if (state.accountId !== account.accountId) await session(account);
 }
 
