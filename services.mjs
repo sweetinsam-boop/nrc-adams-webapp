@@ -303,6 +303,52 @@ function preserveSearchTerms(query, suggested) {
   return combined;
 }
 
+const planPrompt = criteria => `Plan a search of the U.S. Nuclear Regulatory Commission's ADAMS Public Search (APS) for the request below. Return one short Korean intent sentence and up to three genuinely different English search expressions, in priority order.
+Interpret what document the user wants, including the facility or entity, reactor unit, regulatory process or stage, topic, and document role when specified. E.g. an NRC approval or decision calls for a safety evaluation or issued amendment, while the operator application is a license amendment request. A submitted answer is often a Response to Request for Additional Information (RAI). Preserve facility/unit, named systems, original English quotes, and identifiers across relevant variants. Do not invent identifiers, dates, entities or document titles.
+APS treats free-text terms as a conjunction. Use short sets of distinctive terms and quote only established multiword terms that need an exact phrase. Try a precise NRC term, different terminology or an abbreviation, and a broader combination still on the same subject. Avoid long sentences, chains of synonyms, Boolean operators or search engine syntax. Do not append years when dates are provided as filters. Use a type filter only if it improves precision, and leave type empty for a broad variant. User-entered filters are applied separately and take priority.
+Keep dates or years describing a named event separate from the document publication period. Preserve a historical event year in a search expression when it helps identify the event.
+Search request and filters: ${JSON.stringify(criteria)}`;
+
+function parsePlan(answer, criteria) {
+  if (typeof answer?.intent !== 'string' || !answer.intent.trim() || !Array.isArray(answer.searches)) {
+    throw new AppError(502, 'AI가 사용할 검색식을 반환하지 않았습니다.');
+  }
+  const searches = [];
+  const seen = new Set();
+  for (const plan of answer.searches.slice(0, 3)) {
+    if (typeof plan?.query !== 'string' || !plan.query.trim() || plan.query.length > 300 ||
+        /[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/.test(plan.query)) continue;
+    const q = preserveSearchTerms(criteria.q, plan.query.trim().replace(/\s+/g, ' '));
+    const type = criteria.type ? '' : searchTypes.includes(plan.type) ? plan.type : '';
+    const key = `${q.toLowerCase()}\n${type}`;
+    if (!seen.has(key)) searches.push({ q, type });
+    seen.add(key);
+  }
+  if (!searches.length) throw new AppError(502, 'AI가 사용할 영어 검색식을 반환하지 않았습니다.');
+  if (!criteria.type && searches.every(search => search.type)) searches.at(-1).type = '';
+  return { intent: answer.intent.trim().slice(0, 250), searches };
+}
+
+// For a chat AI the user subscribes to: same instructions plus the JSON shape the API schema would enforce.
+export function manualPlanPrompt(criteria) {
+  return `${planPrompt(criteria)}
+
+Reply with only this JSON object and no other text:
+{"intent": "<one Korean sentence>", "searches": [{"query": "<English search expression>", "type": "<document type or empty>"}]}
+Allowed type values: ${searchTypes.filter(Boolean).map(type => `"${type}"`).join(', ')}, or "" for no type filter.`;
+}
+
+export function parseManualPlan(text, criteria) {
+  const json = text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1);
+  let answer;
+  try {
+    answer = JSON.parse(json);
+  } catch {
+    throw new AppError(400, 'AI 답변에서 검색식 JSON을 찾지 못했습니다. 답변 전체를 복사해 붙여넣으세요.');
+  }
+  return parsePlan(answer, criteria);
+}
+
 export function aiClient(fetcher, provider, model, key) {
   async function generate(prompt, format, pdf, { timeout = 95000, maxTokens = 6500, retryUnavailable = false } = {}) {
     const base64 = pdf?.toString('base64');
@@ -362,28 +408,8 @@ export function aiClient(fetcher, provider, model, key) {
       return preserveSearchTerms(query, answer.query.trim().slice(0, 500));
     },
     async planSearch(criteria) {
-      const answer = await generate(`Plan a search of the U.S. Nuclear Regulatory Commission's ADAMS Public Search (APS) for the request below. Return one short Korean intent sentence and up to three genuinely different English search expressions, in priority order.
-Interpret what document the user wants, including the facility or entity, reactor unit, regulatory process or stage, topic, and document role when specified. E.g. an NRC approval or decision calls for a safety evaluation or issued amendment, while the operator application is a license amendment request. A submitted answer is often a Response to Request for Additional Information (RAI). Preserve facility/unit, named systems, original English quotes, and identifiers across relevant variants. Do not invent identifiers, dates, entities or document titles.
-APS treats free-text terms as a conjunction. Use short sets of distinctive terms and quote only established multiword terms that need an exact phrase. Try a precise NRC term, different terminology or an abbreviation, and a broader combination still on the same subject. Avoid long sentences, chains of synonyms, Boolean operators or search engine syntax. Do not append years when dates are provided as filters. Use a type filter only if it improves precision, and leave type empty for a broad variant. User-entered filters are applied separately and take priority.
-Keep dates or years describing a named event separate from the document publication period. Preserve a historical event year in a search expression when it helps identify the event.
-Search request and filters: ${JSON.stringify(criteria)}`, searchSchema, undefined, { timeout: 22000, maxTokens: 2600, retryUnavailable: true });
-      if (typeof answer?.intent !== 'string' || !answer.intent.trim() || !Array.isArray(answer.searches)) {
-        throw new AppError(502, 'AI가 사용할 검색식을 반환하지 않았습니다.');
-      }
-      const searches = [];
-      const seen = new Set();
-      for (const plan of answer.searches.slice(0, 3)) {
-        if (typeof plan?.query !== 'string' || !plan.query.trim() || plan.query.length > 300 ||
-            /[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/.test(plan.query)) continue;
-        const q = preserveSearchTerms(criteria.q, plan.query.trim().replace(/\s+/g, ' '));
-        const type = criteria.type ? '' : searchTypes.includes(plan.type) ? plan.type : '';
-        const key = `${q.toLowerCase()}\n${type}`;
-        if (!seen.has(key)) searches.push({ q, type });
-        seen.add(key);
-      }
-      if (!searches.length) throw new AppError(502, 'AI가 사용할 영어 검색식을 반환하지 않았습니다.');
-      if (!criteria.type && searches.every(search => search.type)) searches.at(-1).type = '';
-      return { intent: answer.intent.trim().slice(0, 250), searches };
+      const answer = await generate(planPrompt(criteria), searchSchema, undefined, { timeout: 22000, maxTokens: 2600, retryUnavailable: true });
+      return parsePlan(answer, criteria);
     },
     async evidenceTerms(question) {
       const result = await generate(`Produce English terms to locate passages in a long NRC PDF for the request below. Return one group per requested field (up to 8). For each group provide 4 to 8 short phrases, acronyms and variants likely to appear in the actual PDF text. Use domain phrases and include concrete identifiers from the question. Do not answer the question. Request: ${JSON.stringify(question)}`, evidenceTermsSchema, undefined, { timeout: 12000, maxTokens: 1600 });

@@ -108,7 +108,7 @@ function authTab(mode) {
 function resetWorkspace() {
   Object.assign(state, {
     session: state.session + 1, documentToken: state.documentToken + 1, analysisToken: state.analysisToken + 1,
-    docs: [], resultsLoaded: false, next: null, search: null, publicSearch: null, searchPlan: null, searchWarnings: [],
+    docs: [], resultsLoaded: false, next: null, search: null, publicSearch: null, searchPlan: null, searchWarnings: [], manualPrompt: null,
     doc: null, settings: null, library: [], record: null, history: [], geminiModels: null, geminiLoading: false, geminiError: '',
     modelsVersion: 0,
   });
@@ -350,8 +350,37 @@ function docCard(doc) {
   return card;
 }
 
+function manualPlanCard() {
+  const card = el('section', null, 'panel search-plan manual-plan');
+  card.append(el('h3', '구독 중인 AI로 검색식 만들기'),
+    el('p', 'AI API에 연결하지 못했습니다. 아래 요청문을 ChatGPT·Claude·Gemini 대화창에 붙여넣고, 받은 답변 전체를 아래 칸에 붙여넣으면 그 검색식으로 검색합니다.'));
+  const prompt = el('textarea', null, 'manual-prompt');
+  prompt.value = state.manualPrompt;
+  prompt.readOnly = true;
+  prompt.setAttribute('aria-label', 'AI에 보낼 요청문');
+  const actions = el('div', null, 'actions');
+  actions.append(button('요청문 복사', async () => {
+    try {
+      await navigator.clipboard.writeText(prompt.value);
+    } catch {
+      prompt.select();
+      document.execCommand('copy');
+    }
+    notice('요청문을 복사했습니다. 사용하는 AI 대화창에 붙여넣으세요.');
+  }), link('ChatGPT ↗', 'https://chatgpt.com/'), link('Claude ↗', 'https://claude.ai/new'), link('Gemini ↗', 'https://gemini.google.com/app'));
+  const answer = el('textarea');
+  answer.placeholder = 'AI 답변을 여기에 붙여넣으세요.';
+  answer.setAttribute('aria-label', 'AI 답변');
+  card.append(prompt, actions, answer, button('이 검색식으로 검색', async () => {
+    if (!answer.value.trim()) throw new Error('AI 답변을 붙여넣으세요.');
+    await search({ ...state.search, smart: true, skip: 0, manualPlan: answer.value });
+  }, 'primary'));
+  return card;
+}
+
 function showSearch() {
   const items = state.searchWarnings.map(warning => el('p', warning, 'notice'));
+  if (state.manualPrompt) items.push(manualPlanCard());
   if (state.searchPlan) {
     const { intent, queries } = state.searchPlan;
     const card = el('section', null, 'panel search-plan');
@@ -402,6 +431,7 @@ async function search(input, append = false) {
   state.publicSearch = data.publicLink ? data : null;
   state.searchPlan = data.plan ?? (append ? state.searchPlan : null);
   state.searchWarnings = data.warnings ?? [];
+  if (!append) state.manualPrompt = data.manualPrompt ?? null;
   state.resultsLoaded = true;
   const union = [...(append ? state.docs : []), ...data.documents];
   state.docs = [...new Map(union.map(doc => [doc.id, doc])).values()];

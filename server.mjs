@@ -7,7 +7,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { aiClient, AppError, downloadPdf, IMPORT_ID, isPdf, listGeminiModels, localPdfText, ML, MODELS, nrcClient,
+import { aiClient, AppError, downloadPdf, IMPORT_ID, isPdf, listGeminiModels, localPdfText, manualPlanPrompt, ML, MODELS, nrcClient, parseManualPlan,
   PDF_LIMIT, publicAccession, publicPdf, publicSearchLink } from './services.mjs';
 import { contextualDates, searchBranches } from './search.mjs';
 import { parsePageRange, preparePdfInput, renderOriginalPdfPage } from './pdf-analysis.mjs';
@@ -589,15 +589,20 @@ export function createApp({ db, encryptionKey, origin, invite, trustProxy = fals
         const smart = q && input.smart !== false;
         if (smart) Object.assign(criteria, contextualDates(q, from, to));
         const warnings = [];
+        let manualPrompt;
         if (smart && skip === 0) {
           let planned;
-          try {
+          const { skip: _skip, legacy: _legacy, ...promptCriteria } = criteria;
+          const manualPlan = field(input.manualPlan, 8000);
+          if (manualPlan) planned = parseManualPlan(manualPlan, promptCriteria);
+          else try {
             rateLimit(`search-plan:${owner}`, 15, 60000);
-            const { skip: _skip, legacy: _legacy, ...promptCriteria } = criteria;
             planned = await ai(owner, provider).client.planSearch(promptCriteria);
           } catch (error) {
             if (!(error instanceof AppError)) throw error;
             warnings.push(`${error.message} 검색에는 입력한 원문과 검색 조건을 그대로 사용합니다.`);
+            // Let the user ask a chat AI they subscribe to and paste its answer back.
+            manualPrompt = manualPlanPrompt(promptCriteria);
           }
           if (planned) {
             const branches = planned.searches.map((search, order) => ({
@@ -611,13 +616,13 @@ export function createApp({ db, encryptionKey, origin, invite, trustProxy = fals
         }
         if (canUseApi) {
           try {
-            return writeJson(res, 200, { ...await nrc(owner).search(criteria), warnings });
+            return writeJson(res, 200, { ...await nrc(owner).search(criteria), warnings, manualPrompt });
           } catch (error) {
             if (!(error instanceof AppError) || ![422, 429, 502, 504].includes(error.status)) throw error;
             warnings.push('NRC API에서 검색 결과를 받지 못했습니다. 같은 조건으로 NRC 공개 검색을 열 수 있습니다.');
           }
         }
-        return writeJson(res, 200, publicSearchResult(criteria, null, warnings));
+        return writeJson(res, 200, { ...publicSearchResult(criteria, null, warnings), manualPrompt });
       }
       if (method === 'POST' && path === '/api/import') {
         rateLimit(`nrc:${owner}`, 45, 60000);
