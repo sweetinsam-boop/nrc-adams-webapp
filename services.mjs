@@ -7,8 +7,8 @@ import { promisify } from 'node:util';
 
 export const MODELS = Object.freeze({
   gemini: 'gemini-3.8-flash',
-  openai: 'gpt-4.1-mini',
-  claude: 'claude-sonnet-4-6',
+  openai: 'gpt-5.4-mini',
+  claude: 'claude-sonnet-5-5',
 });
 export const ML = /^ML\d{5}[A-Z0-9]\d{3}$/;
 export const IMPORT_ID = /^PDF-[a-f0-9]{64}$/;
@@ -326,6 +326,8 @@ export function aiClient(fetcher, provider, model, key) {
       data = await request(fetcher, 'https://api.openai.com/v1/responses', {
         method: 'POST', headers: { ...headers, Authorization: `Bearer ${key}` },
         body: JSON.stringify({ model, instructions, store: false, input: [{ role: 'user', content }],
+          // Reasoning models spend output tokens on reasoning; keep it low as with Gemini thinking.
+          ...(/^(?:gpt-5|o\d)/.test(model) && { reasoning: { effort: 'low' } }),
           text: { format: { type: 'json_schema', name: 'adams_result', strict: true, schema: format } }, max_output_tokens: maxTokens }),
       }, 'OpenAI', timeout);
       output = data.output?.flatMap(item => item.content ?? []).filter(part => part.type === 'output_text').map(part => part.text).join('');
@@ -335,7 +337,9 @@ export function aiClient(fetcher, provider, model, key) {
       data = await request(fetcher, 'https://api.anthropic.com/v1/messages', {
         method: 'POST', headers: { ...headers, 'x-api-key': key, 'anthropic-version': '2023-06-01' },
         body: JSON.stringify({ model, system: instructions, messages: [{ role: 'user', content }], max_tokens: maxTokens,
-          output_config: { format: { type: 'json_schema', schema: format } } }),
+          output_config: { format: { type: 'json_schema', schema: format },
+            // Effort exists on Claude 4.6+ models; older IDs reject it.
+            ...(/^claude-(?:(?:opus|sonnet)-(?:4-[6-9]|[5-9])|haiku-[5-9]|fable|mythos)/.test(model) && { effort: 'low' }) } }),
       }, 'Claude', timeout);
       output = data.content?.filter(part => part.type === 'text').map(part => part.text).join('');
     }
@@ -348,7 +352,7 @@ export function aiClient(fetcher, provider, model, key) {
   return {
     async check() {
       const start = performance.now();
-      const result = await generate('Return only a JSON object with status set to OK.', checkSchema, undefined, { timeout: 22000, maxTokens: 512 });
+      const result = await generate('Return only a JSON object with status set to OK.', checkSchema, undefined, { timeout: 22000, maxTokens: 1024 });
       if (typeof result?.status !== 'string' || result.status.toUpperCase() !== 'OK') throw new AppError(502, 'AI 응답 형식이 예상과 다릅니다.');
       return { model, elapsedMs: Math.round(performance.now() - start) };
     },

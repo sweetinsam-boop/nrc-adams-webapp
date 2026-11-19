@@ -1,7 +1,6 @@
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -14,8 +13,6 @@ const TEXT_LIMIT = 160000;
 
 function pythonCommand() {
   if (process.env.ADAMS_PYTHON) return [process.env.ADAMS_PYTHON];
-  const bundled = join(homedir(), '.cache', 'codex-runtimes', 'codex-primary-runtime', 'dependencies', 'python', 'python.exe');
-  if (process.platform === 'win32' && existsSync(bundled)) return [bundled];
   return process.platform === 'win32' ? ['py', '-3'] : ['python3'];
 }
 

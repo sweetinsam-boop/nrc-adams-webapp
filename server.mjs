@@ -129,7 +129,7 @@ function init(db) {
   if (!analysisColumns.has('input_version')) db.exec('ALTER TABLE analyses ADD COLUMN input_version INTEGER NOT NULL DEFAULT 1');
 }
 
-export function createApp({ db, encryptionKey, origin, invite, fetcher = fetch, pdfText = localPdfText, renderPage = renderOriginalPdfPage }) {
+export function createApp({ db, encryptionKey, origin, invite, trustProxy = false, fetcher = fetch, pdfText = localPdfText, renderPage = renderOriginalPdfPage }) {
   init(db);
   const run = (sql, ...values) => db.prepare(sql).run(...values);
   const one = (sql, ...values) => db.prepare(sql).get(...values);
@@ -146,6 +146,8 @@ export function createApp({ db, encryptionKey, origin, invite, fetcher = fetch, 
   let renders = 0;
   let renderedBytes = 0;
   const secure = origin?.startsWith('https:') ? '; Secure' : '';
+  // Behind a reverse proxy every socket address is the proxy; use the address that proxy appended last.
+  const clientAddress = req => (trustProxy && req.headers['x-forwarded-for']?.split(',').at(-1).trim()) || req.socket.remoteAddress;
   const sessionCookie = (token, seconds) => `${SESSION}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${seconds}${secure}`;
   function credential(owner, provider) {
     const saved = one('SELECT secret, model FROM credentials WHERE owner = ? AND provider = ?', owner, provider);
@@ -241,12 +243,13 @@ export function createApp({ db, encryptionKey, origin, invite, fetcher = fetch, 
     return source;
   }
   async function readPublicPdf(url) {
-    const saved = pdfCache.get(url);
-    if (saved && saved.expires > Date.now()) return saved.pdf;
-    if (saved) {
-      pdfCache.delete(url);
-      cachedBytes -= saved.pdf.length;
+    for (const [key, entry] of pdfCache) {
+      if (entry.expires > Date.now()) continue;
+      pdfCache.delete(key);
+      cachedBytes -= entry.pdf.length;
     }
+    const saved = pdfCache.get(url);
+    if (saved) return saved.pdf;
     if (pdfDownloads.has(url)) return pdfDownloads.get(url);
     if (pdfDownloads.size >= 4) throw new AppError(429, 'NRC PDF를 가져오는 중입니다. 잠시 후 다시 시도하세요.');
     const pending = downloadPdf(fetcher, url).then(pdf => {
@@ -448,13 +451,14 @@ export function createApp({ db, encryptionKey, origin, invite, fetcher = fetch, 
       });
 
       if (method === 'POST' && ['/api/signup', '/api/login'].includes(path)) {
-        rateLimit(`auth:${req.socket.remoteAddress}`, 30, 600000);
+        rateLimit(`auth:${clientAddress(req)}`, 30, 600000);
         const input = await json(req);
         const email = field(input.email, 254).toLowerCase();
         const password = input.password;
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || typeof password !== 'string' || password.length < 12 || password.length > 128) {
           throw new AppError(400, '이메일과 12~128자 비밀번호를 입력하세요.');
         }
+        rateLimit(`auth-email:${email}`, 10, 600000);
         let account = one('SELECT * FROM users WHERE email = ?', email);
         const signup = path.endsWith('signup');
         if (signup && invite && !timingSafeEqual(Buffer.from(checksum(field(input.invite, 200))), Buffer.from(checksum(invite)))) throw new AppError(403, '초대 코드를 확인하세요.');
@@ -732,6 +736,7 @@ async function start() {
   const originValue = process.env.ADAMS_ORIGIN;
   const origin = originValue ? new URL(originValue).origin : undefined;
   const invite = process.env.ADAMS_INVITE_CODE?.trim();
+  const trustProxy = process.env.ADAMS_TRUST_PROXY === '1';
   const master = process.env.ADAMS_MASTER_KEY?.trim();
   if ((origin && !origin.startsWith('https:')) ||
       ((origin || host !== '127.0.0.1') && (!origin || !master || !invite || invite.length < 12))) {
@@ -758,7 +763,7 @@ async function start() {
     throw error;
   }
   const db = new DatabaseSync(resolve(data, 'adams.sqlite'));
-  const server = createApp({ db, encryptionKey, origin, invite });
+  const server = createApp({ db, encryptionKey, origin, invite, trustProxy });
   server.once('close', () => instance.close());
   server.listen(port, host, () => process.stdout.write(`ADAMS 문서 분석 · http://${host}:${server.address().port}\n`));
 }

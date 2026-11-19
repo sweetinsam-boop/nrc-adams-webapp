@@ -17,6 +17,15 @@
 4. 계정을 만든 뒤 **API 설정**에 Gemini, OpenAI 또는 Claude API 키를 등록합니다. NRC APS 키는 앱 안에서 검색 결과를 조회할 때 사용합니다. 키 없이도 NRC 공개 검색, ML 번호 조회, PDF 가져오기를 이용할 수 있습니다.
 5. 검색창에 `ML24017A120`을 입력해 문서를 열고 **한영 요약 → 요약 생성**으로 실행을 확인합니다.
 
+## macOS·Linux에서 시작하기
+
+Node.js 24 이상과 Python 3을 설치한 뒤 압축을 푼 폴더에서 실행합니다. 브라우저가 자동으로 열립니다.
+
+```bash
+python3 -m pip install -r requirements.txt
+node --env-file-if-exists=.env launcher.mjs
+```
+
 배포 파일은 소스 ZIP입니다. 계정·보관함·키는 첫 실행 후 로컬 데이터 폴더에 저장됩니다. 설정, 오류 대응 및 백업은 [사용 매뉴얼](MANUAL.md)을 참고하세요.
 
 ## 테스트

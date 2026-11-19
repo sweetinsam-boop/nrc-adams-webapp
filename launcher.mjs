@@ -53,8 +53,10 @@ async function launch() {
   if (process.env.ADAMS_LAUNCH_NO_BROWSER !== '1') {
     const browserUrl = process.env.ADAMS_ORIGIN ? new URL(process.env.ADAMS_ORIGIN).origin : origin;
     if (process.env.ADAMS_ORIGIN && !browserUrl.startsWith('https:')) throw new Error('ADAMS_ORIGIN must use HTTPS.');
-    await promisify(execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-      `Start-Process -FilePath '${browserUrl.replaceAll("'", "''")}'`], { windowsHide: true });
+    const [command, args] = process.platform === 'win32'
+      ? ['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Start-Process -FilePath '${browserUrl.replaceAll("'", "''")}'`]]
+      : [process.platform === 'darwin' ? 'open' : 'xdg-open', [browserUrl]];
+    await promisify(execFile)(command, args, { windowsHide: true });
   }
 }
 
