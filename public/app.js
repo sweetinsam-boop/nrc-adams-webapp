@@ -9,6 +9,7 @@ const state = { session: 0, view: 'search', mode: 'summary', docs: [], resultsLo
   previewRequest: null, previewPage: 1, previewTotal: null, previewObject: null };
 let authMode = 'login';
 let inviteRequired = false;
+let localAccess = false;
 let searchToken = 0;
 let accountCheck = 0;
 const authEvent = 'adams-account-change';
@@ -107,7 +108,7 @@ function authTab(mode) {
 function resetWorkspace() {
   Object.assign(state, {
     session: state.session + 1, documentToken: state.documentToken + 1, analysisToken: state.analysisToken + 1,
-    docs: [], resultsLoaded: false, next: null, search: null, publicSearch: null, searchPlan: null, searchWarnings: [],
+    docs: [], resultsLoaded: false, next: null, search: null, publicSearch: null, searchPlan: null, searchWarnings: [], manualPrompt: null,
     doc: null, settings: null, library: [], record: null, history: [], geminiModels: null, geminiLoading: false, geminiError: '',
     modelsVersion: 0,
   });
@@ -140,7 +141,8 @@ async function session({ email, accountId }) {
   $('session').hidden = !email;
   $('auth').hidden = Boolean(email);
   $('workspace').hidden = !email;
-  $('email').textContent = email || '';
+  $('email').textContent = localAccess ? '로컬 모드' : email || '';
+  $('logout').hidden = localAccess;
   if (!email) {
     authTab('login');
     return;
@@ -158,6 +160,7 @@ async function syncAccount() {
   const account = await api('/api/me');
   if (version !== accountCheck) return;
   inviteRequired = account.inviteRequired;
+  localAccess = account.local === true;
   if (state.accountId !== account.accountId) await session(account);
 }
 
@@ -347,8 +350,37 @@ function docCard(doc) {
   return card;
 }
 
+function manualPlanCard() {
+  const card = el('section', null, 'panel search-plan manual-plan');
+  card.append(el('h3', '구독 중인 AI로 검색식 만들기'),
+    el('p', '아래 요청문을 ChatGPT·Claude·Gemini 대화창에 붙여넣고, 받은 답변 전체를 아래 칸에 붙여넣으면 그 검색식으로 검색합니다.'));
+  const prompt = el('textarea', null, 'manual-prompt');
+  prompt.value = state.manualPrompt;
+  prompt.readOnly = true;
+  prompt.setAttribute('aria-label', 'AI에 보낼 요청문');
+  const actions = el('div', null, 'actions');
+  actions.append(button('요청문 복사', async () => {
+    try {
+      await navigator.clipboard.writeText(prompt.value);
+    } catch {
+      prompt.select();
+      document.execCommand('copy');
+    }
+    notice('요청문을 복사했습니다. 사용하는 AI 대화창에 붙여넣으세요.');
+  }), link('ChatGPT ↗', 'https://chatgpt.com/'), link('Claude ↗', 'https://claude.ai/new'), link('Gemini ↗', 'https://gemini.google.com/app'));
+  const answer = el('textarea');
+  answer.placeholder = 'AI 답변을 여기에 붙여넣으세요.';
+  answer.setAttribute('aria-label', 'AI 답변');
+  card.append(prompt, actions, answer, button('이 검색식으로 검색', async () => {
+    if (!answer.value.trim()) throw new Error('AI 답변을 붙여넣으세요.');
+    await search({ ...state.search, smart: true, skip: 0, manualPlan: answer.value });
+  }, 'primary'));
+  return card;
+}
+
 function showSearch() {
   const items = state.searchWarnings.map(warning => el('p', warning, 'notice'));
+  if (state.manualPrompt) items.push(manualPlanCard());
   if (state.searchPlan) {
     const { intent, queries } = state.searchPlan;
     const card = el('section', null, 'panel search-plan');
@@ -399,6 +431,7 @@ async function search(input, append = false) {
   state.publicSearch = data.publicLink ? data : null;
   state.searchPlan = data.plan ?? (append ? state.searchPlan : null);
   state.searchWarnings = data.warnings ?? [];
+  if (!append) state.manualPrompt = data.manualPrompt ?? null;
   state.resultsLoaded = true;
   const union = [...(append ? state.docs : []), ...data.documents];
   state.docs = [...new Map(union.map(doc => [doc.id, doc])).values()];
@@ -822,13 +855,21 @@ $('provider').onchange = () => busy($('provider'), async () => {
   state.settings = settings;
   notice(settings.keys[settings.provider] ? '기본 AI를 저장했습니다.' : '선택한 제공자의 API 키를 입력해 주세요.');
 }, error => { $('provider').value = state.settings.provider; notice(error.message, true); });
+function searchInput(form) {
+  const input = Object.fromEntries(new FormData(form));
+  return { ...input, smart: input.smart === 'on', public: input.public === 'on', legacy: input.legacy === 'on' };
+}
 $('search-form').onsubmit = event => {
   event.preventDefault();
   const form = event.currentTarget;
-  const input = Object.fromEntries(new FormData(form));
-  void busy(form.querySelector('button.primary'), () => search({ ...input, smart: input.smart === 'on',
-    public: input.public === 'on', legacy: input.legacy === 'on' }));
+  void busy(form.querySelector('button.primary'), () => search(searchInput(form)));
 };
+$('manual-plan').onclick = () => busy($('manual-plan'), async () => {
+  const form = $('search-form');
+  if (!form.elements.q.value.trim()) throw new Error('찾는 문서를 먼저 입력하세요.');
+  // Skips the AI API: the server returns the prompt and searches the original wording meanwhile.
+  await search({ ...searchInput(form), smart: true, manualRequest: true });
+});
 $('public-form').onsubmit = event => {
   event.preventDefault();
   const form = event.currentTarget;

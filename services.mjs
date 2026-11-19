@@ -7,8 +7,8 @@ import { promisify } from 'node:util';
 
 export const MODELS = Object.freeze({
   gemini: 'gemini-3.8-flash',
-  openai: 'gpt-4.1-mini',
-  claude: 'claude-sonnet-4-6',
+  openai: 'gpt-5.4-mini',
+  claude: 'claude-sonnet-5-5',
 });
 export const ML = /^ML\d{5}[A-Z0-9]\d{3}$/;
 export const IMPORT_ID = /^PDF-[a-f0-9]{64}$/;
@@ -303,6 +303,52 @@ function preserveSearchTerms(query, suggested) {
   return combined;
 }
 
+const planPrompt = criteria => `Plan a search of the U.S. Nuclear Regulatory Commission's ADAMS Public Search (APS) for the request below. Return one short Korean intent sentence and up to three genuinely different English search expressions, in priority order.
+Interpret what document the user wants, including the facility or entity, reactor unit, regulatory process or stage, topic, and document role when specified. E.g. an NRC approval or decision calls for a safety evaluation or issued amendment, while the operator application is a license amendment request. A submitted answer is often a Response to Request for Additional Information (RAI). Preserve facility/unit, named systems, original English quotes, and identifiers across relevant variants. Do not invent identifiers, dates, entities or document titles.
+APS treats free-text terms as a conjunction. Use short sets of distinctive terms and quote only established multiword terms that need an exact phrase. Try a precise NRC term, different terminology or an abbreviation, and a broader combination still on the same subject. Avoid long sentences, chains of synonyms, Boolean operators or search engine syntax. Do not append years when dates are provided as filters. Use a type filter only if it improves precision, and leave type empty for a broad variant. User-entered filters are applied separately and take priority.
+Keep dates or years describing a named event separate from the document publication period. Preserve a historical event year in a search expression when it helps identify the event.
+Search request and filters: ${JSON.stringify(criteria)}`;
+
+function parsePlan(answer, criteria) {
+  if (typeof answer?.intent !== 'string' || !answer.intent.trim() || !Array.isArray(answer.searches)) {
+    throw new AppError(502, 'AI가 사용할 검색식을 반환하지 않았습니다.');
+  }
+  const searches = [];
+  const seen = new Set();
+  for (const plan of answer.searches.slice(0, 3)) {
+    if (typeof plan?.query !== 'string' || !plan.query.trim() || plan.query.length > 300 ||
+        /[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/.test(plan.query)) continue;
+    const q = preserveSearchTerms(criteria.q, plan.query.trim().replace(/\s+/g, ' '));
+    const type = criteria.type ? '' : searchTypes.includes(plan.type) ? plan.type : '';
+    const key = `${q.toLowerCase()}\n${type}`;
+    if (!seen.has(key)) searches.push({ q, type });
+    seen.add(key);
+  }
+  if (!searches.length) throw new AppError(502, 'AI가 사용할 영어 검색식을 반환하지 않았습니다.');
+  if (!criteria.type && searches.every(search => search.type)) searches.at(-1).type = '';
+  return { intent: answer.intent.trim().slice(0, 250), searches };
+}
+
+// For a chat AI the user subscribes to: same instructions plus the JSON shape the API schema would enforce.
+export function manualPlanPrompt(criteria) {
+  return `${planPrompt(criteria)}
+
+Reply with only this JSON object and no other text:
+{"intent": "<one Korean sentence>", "searches": [{"query": "<English search expression>", "type": "<document type or empty>"}]}
+Allowed type values: ${searchTypes.filter(Boolean).map(type => `"${type}"`).join(', ')}, or "" for no type filter.`;
+}
+
+export function parseManualPlan(text, criteria) {
+  const json = text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1);
+  let answer;
+  try {
+    answer = JSON.parse(json);
+  } catch {
+    throw new AppError(400, 'AI 답변에서 검색식 JSON을 찾지 못했습니다. 답변 전체를 복사해 붙여넣으세요.');
+  }
+  return parsePlan(answer, criteria);
+}
+
 export function aiClient(fetcher, provider, model, key) {
   async function generate(prompt, format, pdf, { timeout = 95000, maxTokens = 6500, retryUnavailable = false } = {}) {
     const base64 = pdf?.toString('base64');
@@ -326,6 +372,8 @@ export function aiClient(fetcher, provider, model, key) {
       data = await request(fetcher, 'https://api.openai.com/v1/responses', {
         method: 'POST', headers: { ...headers, Authorization: `Bearer ${key}` },
         body: JSON.stringify({ model, instructions, store: false, input: [{ role: 'user', content }],
+          // Reasoning models spend output tokens on reasoning; keep it low as with Gemini thinking.
+          ...(/^(?:gpt-5|o\d)/.test(model) && { reasoning: { effort: 'low' } }),
           text: { format: { type: 'json_schema', name: 'adams_result', strict: true, schema: format } }, max_output_tokens: maxTokens }),
       }, 'OpenAI', timeout);
       output = data.output?.flatMap(item => item.content ?? []).filter(part => part.type === 'output_text').map(part => part.text).join('');
@@ -335,7 +383,9 @@ export function aiClient(fetcher, provider, model, key) {
       data = await request(fetcher, 'https://api.anthropic.com/v1/messages', {
         method: 'POST', headers: { ...headers, 'x-api-key': key, 'anthropic-version': '2023-06-01' },
         body: JSON.stringify({ model, system: instructions, messages: [{ role: 'user', content }], max_tokens: maxTokens,
-          output_config: { format: { type: 'json_schema', schema: format } } }),
+          output_config: { format: { type: 'json_schema', schema: format },
+            // Effort exists on Claude 4.6+ models; older IDs reject it.
+            ...(/^claude-(?:(?:opus|sonnet)-(?:4-[6-9]|[5-9])|haiku-[5-9]|fable|mythos)/.test(model) && { effort: 'low' }) } }),
       }, 'Claude', timeout);
       output = data.content?.filter(part => part.type === 'text').map(part => part.text).join('');
     }
@@ -348,7 +398,7 @@ export function aiClient(fetcher, provider, model, key) {
   return {
     async check() {
       const start = performance.now();
-      const result = await generate('Return only a JSON object with status set to OK.', checkSchema, undefined, { timeout: 22000, maxTokens: 512 });
+      const result = await generate('Return only a JSON object with status set to OK.', checkSchema, undefined, { timeout: 22000, maxTokens: 1024 });
       if (typeof result?.status !== 'string' || result.status.toUpperCase() !== 'OK') throw new AppError(502, 'AI 응답 형식이 예상과 다릅니다.');
       return { model, elapsedMs: Math.round(performance.now() - start) };
     },
@@ -358,28 +408,8 @@ export function aiClient(fetcher, provider, model, key) {
       return preserveSearchTerms(query, answer.query.trim().slice(0, 500));
     },
     async planSearch(criteria) {
-      const answer = await generate(`Plan a search of the U.S. Nuclear Regulatory Commission's ADAMS Public Search (APS) for the request below. Return one short Korean intent sentence and up to three genuinely different English search expressions, in priority order.
-Interpret what document the user wants, including the facility or entity, reactor unit, regulatory process or stage, topic, and document role when specified. E.g. an NRC approval or decision calls for a safety evaluation or issued amendment, while the operator application is a license amendment request. A submitted answer is often a Response to Request for Additional Information (RAI). Preserve facility/unit, named systems, original English quotes, and identifiers across relevant variants. Do not invent identifiers, dates, entities or document titles.
-APS treats free-text terms as a conjunction. Use short sets of distinctive terms and quote only established multiword terms that need an exact phrase. Try a precise NRC term, different terminology or an abbreviation, and a broader combination still on the same subject. Avoid long sentences, chains of synonyms, Boolean operators or search engine syntax. Do not append years when dates are provided as filters. Use a type filter only if it improves precision, and leave type empty for a broad variant. User-entered filters are applied separately and take priority.
-Keep dates or years describing a named event separate from the document publication period. Preserve a historical event year in a search expression when it helps identify the event.
-Search request and filters: ${JSON.stringify(criteria)}`, searchSchema, undefined, { timeout: 22000, maxTokens: 2600, retryUnavailable: true });
-      if (typeof answer?.intent !== 'string' || !answer.intent.trim() || !Array.isArray(answer.searches)) {
-        throw new AppError(502, 'AI가 사용할 검색식을 반환하지 않았습니다.');
-      }
-      const searches = [];
-      const seen = new Set();
-      for (const plan of answer.searches.slice(0, 3)) {
-        if (typeof plan?.query !== 'string' || !plan.query.trim() || plan.query.length > 300 ||
-            /[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/.test(plan.query)) continue;
-        const q = preserveSearchTerms(criteria.q, plan.query.trim().replace(/\s+/g, ' '));
-        const type = criteria.type ? '' : searchTypes.includes(plan.type) ? plan.type : '';
-        const key = `${q.toLowerCase()}\n${type}`;
-        if (!seen.has(key)) searches.push({ q, type });
-        seen.add(key);
-      }
-      if (!searches.length) throw new AppError(502, 'AI가 사용할 영어 검색식을 반환하지 않았습니다.');
-      if (!criteria.type && searches.every(search => search.type)) searches.at(-1).type = '';
-      return { intent: answer.intent.trim().slice(0, 250), searches };
+      const answer = await generate(planPrompt(criteria), searchSchema, undefined, { timeout: 22000, maxTokens: 2600, retryUnavailable: true });
+      return parsePlan(answer, criteria);
     },
     async evidenceTerms(question) {
       const result = await generate(`Produce English terms to locate passages in a long NRC PDF for the request below. Return one group per requested field (up to 8). For each group provide 4 to 8 short phrases, acronyms and variants likely to appear in the actual PDF text. Use domain phrases and include concrete identifiers from the question. Do not answer the question. Request: ${JSON.stringify(question)}`, evidenceTermsSchema, undefined, { timeout: 12000, maxTokens: 1600 });

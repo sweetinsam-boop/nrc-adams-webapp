@@ -83,6 +83,8 @@ select { appearance: none; padding-right: 2.05rem; background-image: linear-grad
 .search-plan p, .search-plan li { overflow-wrap: anywhere; }
 .search-queries { display: grid; gap: .5rem; margin: .65rem 0 0; padding-inline-start: 1.35rem; }
 .search-queries li > div { margin-top: .16rem; }
+.manual-plan .manual-prompt { min-height: 7rem; font-size: .85rem; color: var(--muted, #555); }
+.manual-plan > button { justify-self: start; }
 .search-panel details { border-top: 1px solid var(--line); margin-top: 1rem; padding-top: .8rem; }
 summary { cursor: pointer; color: var(--primary); font-weight: 650; font-size: .925rem; }
 .filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; margin: .85rem 0; }

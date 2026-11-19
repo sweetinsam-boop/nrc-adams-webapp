@@ -7,7 +7,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { aiClient, AppError, downloadPdf, IMPORT_ID, isPdf, listGeminiModels, localPdfText, ML, MODELS, nrcClient,
+import { aiClient, AppError, downloadPdf, IMPORT_ID, isPdf, listGeminiModels, localPdfText, manualPlanPrompt, ML, MODELS, nrcClient, parseManualPlan,
   PDF_LIMIT, publicAccession, publicPdf, publicSearchLink } from './services.mjs';
 import { contextualDates, searchBranches } from './search.mjs';
 import { parsePageRange, preparePdfInput, renderOriginalPdfPage } from './pdf-analysis.mjs';
@@ -129,7 +129,7 @@ function init(db) {
   if (!analysisColumns.has('input_version')) db.exec('ALTER TABLE analyses ADD COLUMN input_version INTEGER NOT NULL DEFAULT 1');
 }
 
-export function createApp({ db, encryptionKey, origin, invite, fetcher = fetch, pdfText = localPdfText, renderPage = renderOriginalPdfPage }) {
+export function createApp({ db, encryptionKey, origin, invite, trustProxy = false, localAccess = false, fetcher = fetch, pdfText = localPdfText, renderPage = renderOriginalPdfPage }) {
   init(db);
   const run = (sql, ...values) => db.prepare(sql).run(...values);
   const one = (sql, ...values) => db.prepare(sql).get(...values);
@@ -146,7 +146,17 @@ export function createApp({ db, encryptionKey, origin, invite, fetcher = fetch, 
   let renders = 0;
   let renderedBytes = 0;
   const secure = origin?.startsWith('https:') ? '; Secure' : '';
+  // Behind a reverse proxy every socket address is the proxy; use the address that proxy appended last.
+  const clientAddress = req => (trustProxy && req.headers['x-forwarded-for']?.split(',').at(-1).trim()) || req.socket.remoteAddress;
   const sessionCookie = (token, seconds) => `${SESSION}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${seconds}${secure}`;
+  // Loopback-only mode: requests without a session use the first account (created on demand).
+  function localUser() {
+    const existing = one('SELECT id, email, provider FROM users ORDER BY rowid LIMIT 1');
+    if (existing) return existing;
+    const id = randomUUID();
+    run("INSERT INTO users(id, email, salt, password) VALUES(?, 'local', ?, ?)", id, randomBytes(16).toString('hex'), randomBytes(64).toString('hex'));
+    return { id, email: 'local', provider: 'gemini' };
+  }
   function credential(owner, provider) {
     const saved = one('SELECT secret, model FROM credentials WHERE owner = ? AND provider = ?', owner, provider);
     if (!saved) throw new AppError(422, provider === 'nrc' ? 'API 설정에서 NRC 키를 먼저 저장하세요.' : 'API 설정에서 선택한 AI 제공자의 키를 먼저 저장하세요.');
@@ -241,12 +251,13 @@ export function createApp({ db, encryptionKey, origin, invite, fetcher = fetch, 
     return source;
   }
   async function readPublicPdf(url) {
-    const saved = pdfCache.get(url);
-    if (saved && saved.expires > Date.now()) return saved.pdf;
-    if (saved) {
-      pdfCache.delete(url);
-      cachedBytes -= saved.pdf.length;
+    for (const [key, entry] of pdfCache) {
+      if (entry.expires > Date.now()) continue;
+      pdfCache.delete(key);
+      cachedBytes -= entry.pdf.length;
     }
+    const saved = pdfCache.get(url);
+    if (saved) return saved.pdf;
     if (pdfDownloads.has(url)) return pdfDownloads.get(url);
     if (pdfDownloads.size >= 4) throw new AppError(429, 'NRC PDF를 가져오는 중입니다. 잠시 후 다시 시도하세요.');
     const pending = downloadPdf(fetcher, url).then(pdf => {
@@ -442,19 +453,24 @@ export function createApp({ db, encryptionKey, origin, invite, fetcher = fetch, 
         return;
       }
       const token = /(?:^|;\s*)adams_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie ?? '')?.[1];
-      const user = token && one('SELECT users.id, users.email, users.provider FROM sessions JOIN users ON users.id = sessions.owner WHERE token = ? AND expires > ?', checksum(token), Date.now());
+      const sessionUser = token && one('SELECT users.id, users.email, users.provider FROM sessions JOIN users ON users.id = sessions.owner WHERE token = ? AND expires > ?', checksum(token), Date.now());
+      // Browsers mark requests from other sites; never give those the implicit local account.
+      const sameSite = ['same-origin', 'none', undefined].includes(req.headers['sec-fetch-site']);
+      const local = !sessionUser && localAccess && sameSite;
+      const user = sessionUser || (local ? localUser() : null);
       if (method === 'GET' && path === '/api/me') return writeJson(res, 200, {
-        email: user?.email ?? null, accountId: user?.id ?? null, inviteRequired: Boolean(invite),
+        email: user?.email ?? null, accountId: user?.id ?? null, inviteRequired: Boolean(invite), local,
       });
 
       if (method === 'POST' && ['/api/signup', '/api/login'].includes(path)) {
-        rateLimit(`auth:${req.socket.remoteAddress}`, 30, 600000);
+        rateLimit(`auth:${clientAddress(req)}`, 30, 600000);
         const input = await json(req);
         const email = field(input.email, 254).toLowerCase();
         const password = input.password;
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || typeof password !== 'string' || password.length < 12 || password.length > 128) {
           throw new AppError(400, '이메일과 12~128자 비밀번호를 입력하세요.');
         }
+        rateLimit(`auth-email:${email}`, 10, 600000);
         let account = one('SELECT * FROM users WHERE email = ?', email);
         const signup = path.endsWith('signup');
         if (signup && invite && !timingSafeEqual(Buffer.from(checksum(field(input.invite, 200))), Buffer.from(checksum(invite)))) throw new AppError(403, '초대 코드를 확인하세요.');
@@ -573,15 +589,21 @@ export function createApp({ db, encryptionKey, origin, invite, fetcher = fetch, 
         const smart = q && input.smart !== false;
         if (smart) Object.assign(criteria, contextualDates(q, from, to));
         const warnings = [];
+        let manualPrompt;
         if (smart && skip === 0) {
           let planned;
-          try {
+          const { skip: _skip, legacy: _legacy, ...promptCriteria } = criteria;
+          const manualPlan = field(input.manualPlan, 8000);
+          if (manualPlan) planned = parseManualPlan(manualPlan, promptCriteria);
+          else if (input.manualRequest === true) manualPrompt = manualPlanPrompt(promptCriteria);
+          else try {
             rateLimit(`search-plan:${owner}`, 15, 60000);
-            const { skip: _skip, legacy: _legacy, ...promptCriteria } = criteria;
             planned = await ai(owner, provider).client.planSearch(promptCriteria);
           } catch (error) {
             if (!(error instanceof AppError)) throw error;
             warnings.push(`${error.message} 검색에는 입력한 원문과 검색 조건을 그대로 사용합니다.`);
+            // Let the user ask a chat AI they subscribe to and paste its answer back.
+            manualPrompt = manualPlanPrompt(promptCriteria);
           }
           if (planned) {
             const branches = planned.searches.map((search, order) => ({
@@ -595,13 +617,13 @@ export function createApp({ db, encryptionKey, origin, invite, fetcher = fetch, 
         }
         if (canUseApi) {
           try {
-            return writeJson(res, 200, { ...await nrc(owner).search(criteria), warnings });
+            return writeJson(res, 200, { ...await nrc(owner).search(criteria), warnings, manualPrompt });
           } catch (error) {
             if (!(error instanceof AppError) || ![422, 429, 502, 504].includes(error.status)) throw error;
             warnings.push('NRC API에서 검색 결과를 받지 못했습니다. 같은 조건으로 NRC 공개 검색을 열 수 있습니다.');
           }
         }
-        return writeJson(res, 200, publicSearchResult(criteria, null, warnings));
+        return writeJson(res, 200, { ...publicSearchResult(criteria, null, warnings), manualPrompt });
       }
       if (method === 'POST' && path === '/api/import') {
         rateLimit(`nrc:${owner}`, 45, 60000);
@@ -732,6 +754,7 @@ async function start() {
   const originValue = process.env.ADAMS_ORIGIN;
   const origin = originValue ? new URL(originValue).origin : undefined;
   const invite = process.env.ADAMS_INVITE_CODE?.trim();
+  const trustProxy = process.env.ADAMS_TRUST_PROXY === '1';
   const master = process.env.ADAMS_MASTER_KEY?.trim();
   if ((origin && !origin.startsWith('https:')) ||
       ((origin || host !== '127.0.0.1') && (!origin || !master || !invite || invite.length < 12))) {
@@ -758,7 +781,8 @@ async function start() {
     throw error;
   }
   const db = new DatabaseSync(resolve(data, 'adams.sqlite'));
-  const server = createApp({ db, encryptionKey, origin, invite });
+  // Without ADAMS_ORIGIN the server only listens on 127.0.0.1 (checked above), so it can skip sign-in.
+  const server = createApp({ db, encryptionKey, origin, invite, trustProxy, localAccess: !origin });
   server.once('close', () => instance.close());
   server.listen(port, host, () => process.stdout.write(`ADAMS 문서 분석 · http://${host}:${server.address().port}\n`));
 }
