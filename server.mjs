@@ -595,6 +595,7 @@ export function createApp({ db, encryptionKey, origin, invite, trustProxy = fals
           const { skip: _skip, legacy: _legacy, ...promptCriteria } = criteria;
           const manualPlan = field(input.manualPlan, 8000);
           if (manualPlan) planned = parseManualPlan(manualPlan, promptCriteria);
+          else if (input.manualRequest === true) manualPrompt = manualPlanPrompt(promptCriteria);
           else try {
             rateLimit(`search-plan:${owner}`, 15, 60000);
             planned = await ai(owner, provider).client.planSearch(promptCriteria);

@@ -34,4 +34,9 @@ test('without an AI key the search offers a chat prompt and accepts the pasted a
 
   const invalid = await search({ ...request, manualPlan: '검색식을 만들 수 없습니다.' });
   assert.equal(invalid.status, 400);
+
+  // On request the prompt comes back without trying the AI API (no failure warning).
+  const requested = await (await search({ ...request, manualRequest: true })).json();
+  assert.match(requested.manualPrompt, /Reply with only this JSON object/);
+  assert.deepEqual(requested.warnings, []);
 });

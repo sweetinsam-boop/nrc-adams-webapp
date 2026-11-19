@@ -353,7 +353,7 @@ function docCard(doc) {
 function manualPlanCard() {
   const card = el('section', null, 'panel search-plan manual-plan');
   card.append(el('h3', '구독 중인 AI로 검색식 만들기'),
-    el('p', 'AI API에 연결하지 못했습니다. 아래 요청문을 ChatGPT·Claude·Gemini 대화창에 붙여넣고, 받은 답변 전체를 아래 칸에 붙여넣으면 그 검색식으로 검색합니다.'));
+    el('p', '아래 요청문을 ChatGPT·Claude·Gemini 대화창에 붙여넣고, 받은 답변 전체를 아래 칸에 붙여넣으면 그 검색식으로 검색합니다.'));
   const prompt = el('textarea', null, 'manual-prompt');
   prompt.value = state.manualPrompt;
   prompt.readOnly = true;
@@ -855,13 +855,21 @@ $('provider').onchange = () => busy($('provider'), async () => {
   state.settings = settings;
   notice(settings.keys[settings.provider] ? '기본 AI를 저장했습니다.' : '선택한 제공자의 API 키를 입력해 주세요.');
 }, error => { $('provider').value = state.settings.provider; notice(error.message, true); });
+function searchInput(form) {
+  const input = Object.fromEntries(new FormData(form));
+  return { ...input, smart: input.smart === 'on', public: input.public === 'on', legacy: input.legacy === 'on' };
+}
 $('search-form').onsubmit = event => {
   event.preventDefault();
   const form = event.currentTarget;
-  const input = Object.fromEntries(new FormData(form));
-  void busy(form.querySelector('button.primary'), () => search({ ...input, smart: input.smart === 'on',
-    public: input.public === 'on', legacy: input.legacy === 'on' }));
+  void busy(form.querySelector('button.primary'), () => search(searchInput(form)));
 };
+$('manual-plan').onclick = () => busy($('manual-plan'), async () => {
+  const form = $('search-form');
+  if (!form.elements.q.value.trim()) throw new Error('찾는 문서를 먼저 입력하세요.');
+  // Skips the AI API: the server returns the prompt and searches the original wording meanwhile.
+  await search({ ...searchInput(form), smart: true, manualRequest: true });
+});
 $('public-form').onsubmit = event => {
   event.preventDefault();
   const form = event.currentTarget;
